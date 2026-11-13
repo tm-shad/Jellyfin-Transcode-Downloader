@@ -39,6 +39,13 @@
 
     const STORAGE_VIDEO_CODEC = 'transcodeDownloader.videoCodec';
     const STORAGE_AUDIO_CODEC = 'transcodeDownloader.audioCodec';
+    const STORAGE_SAVE_MODE = 'transcodeDownloader.saveMode';
+
+    // 'page': fetch into a Blob here (progress bar, queue). 'external': hand a named
+    // /TranscodeDownloader/Download link to a download manager or the browser — see
+    // NamedDownloadController.cs.
+    const SAVE_MODES = ['page', 'external'];
+    let selectedSaveMode = 'page';
 
     let selectedVideoCodec = DEFAULT_VIDEO_CODEC;
     let selectedAudioCodec = DEFAULT_AUDIO_CODEC;
@@ -101,9 +108,26 @@
         SoftwareEncodingHint: 'Software encoding — this can take a long time and the file is held in memory until it finishes.',
         DownloadFailedCodec: 'Download failed — the server could not encode with {codec}.',
         DownloadFailedStatus: 'Download failed (HTTP {status}).',
-        BrowserHandoffHint: 'The Jellyfin Android app cannot save downloads itself, so this opens in your browser. The file is saved as stream.mp4 — rename it afterwards.',
+        BrowserHandoffHint: 'The Jellyfin Android app cannot save downloads itself, so this opens in your browser.',
         BrowserHandoffStarted: 'Handed to your browser — check its downloads.',
         BrowserHandoffFailed: 'Could not open your browser.',
+        SaveWith: 'Save with',
+        SaveInPage: 'This page',
+        SaveExternal: 'Download manager',
+        SaveExternalHint: 'Hands a named link to your download manager or browser. No progress bar here — the transfer happens outside this page.',
+        ExternalShared: 'Link sent — finish the download in your download manager.',
+        ExternalStarted: 'Download started — check your browser or download manager.',
+        LinkCopied: 'Link copied — paste it into your download manager.',
+        ExternalFailed: 'Could not hand the link over. Use Copy link instead.',
+        BatchHeader: '{count} episodes',
+        BatchLoading: 'Loading episodes…',
+        BatchEmpty: 'No downloadable episodes found.',
+        BatchQueued: '{count} episodes queued.',
+        BatchLinksTitle: '{count} download links',
+        CopyAllLinks: 'Copy all links',
+        CopyLink: 'Copy link',
+        SendLink: 'Send',
+        Close: 'Close',
     };
 
     // Populated by initStrings(); null until loaded.
@@ -212,12 +236,12 @@
 
     function buildStopUrl(baseUrl, deviceId, playSessionId, token) {
         return `${baseUrl}/Videos/ActiveEncodings?deviceId=${encodeURIComponent(deviceId)}`
-            + `&playSessionId=${playSessionId}&api_key=${token}`;
+            + `&playSessionId=${playSessionId}&ApiKey=${token}`;
     }
 
     // --- Deferred transcode cleanup (browser handoff only) ---
 
-    // A download handed to the system browser (see handOffToBrowser) leaves this page with no
+    // A download handed to the system browser by builds before the named download endpoint left this page with no
     // completion signal, so the ADR-0004 stop cannot be fired when it ends. The job is recorded
     // instead and stopped on a later page load, once it is old enough that ffmpeg has certainly
     // exited — at which point DELETE /Videos/ActiveEncodings only deletes the leftover temp file.
@@ -515,21 +539,6 @@
         return /Android/i.test(navigator.userAgent || '');
     }
 
-    // Handing the URL over ends this page's involvement: the browser owns the transfer, so there
-    // is no progress, no cancel and no filename of ours — the file lands under the request path
-    // as stream.mp4 because Jellyfin's stream endpoint sends no Content-Disposition.
-    function handOffToBrowser(url, baseUrl, deviceId, playSessionId) {
-        try {
-            window.NativeShell.openUrl(url);
-        } catch (err) {
-            console.error('[TranscodeDownloader] browser handoff failed:', err);
-            showTransientNotice(t('BrowserHandoffFailed'));
-            return;
-        }
-        rememberPendingStop(baseUrl, deviceId, playSessionId);
-        showTransientNotice(t('BrowserHandoffStarted'));
-    }
-
     // The queue panel only renders queued entries, and a handoff never becomes one — this is the
     // only feedback the user gets that anything happened at all.
     function showTransientNotice(text) {
@@ -716,7 +725,7 @@
             getApiClient(0, 10, async (client) => {
                 try {
                     const baseUrl = client.serverAddress() || window.location.origin;
-                    const res = await fetch(`${baseUrl}/TranscodeDownloader/Codecs?api_key=${encodeURIComponent(client.accessToken())}`);
+                    const res = await fetch(`${baseUrl}/TranscodeDownloader/Codecs?ApiKey=${encodeURIComponent(client.accessToken())}`);
                     if (!res.ok) throw new Error(`HTTP ${res.status}`);
                     const payload = await res.json();
 
@@ -925,6 +934,107 @@
         return section;
     }
 
+    // --- Save mode ---
+
+    function isAndroidBrowser() {
+        return /Android/i.test(navigator.userAgent || '') && !isAndroidAppWebView();
+    }
+
+    function selectSaveMode(mode) {
+        if (!SAVE_MODES.includes(mode)) return;
+        selectedSaveMode = mode;
+        storeCodec(STORAGE_SAVE_MODE, mode);
+    }
+
+    // Inside the Android app the page cannot save anything itself (ADR 0005), so the link is
+    // always handed out there, whatever the stored preference says.
+    function effectiveSaveMode() {
+        return isAndroidAppWebView() ? 'external' : selectedSaveMode;
+    }
+
+    function makeToggleChip(label, selected, onClick) {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.textContent = label;
+        chip.setAttribute('aria-pressed', selected ? 'true' : 'false');
+        chip.style.cssText = 'padding:6px 14px;border-radius:16px;font-size:13px;font-family:inherit;color:#fff;cursor:pointer;'
+            + `border:1px solid ${selected ? '#00a4dc' : '#444'};`
+            + `background:${selected ? 'rgba(0,164,220,0.2)' : 'transparent'};`;
+        chip.addEventListener('click', onClick);
+        return chip;
+    }
+
+    function buildSaveModeSection() {
+        const section = document.createElement('div');
+        section.style.cssText = 'padding:0 20px 8px;';
+
+        const render = () => {
+            section.textContent = '';
+            const title = document.createElement('div');
+            title.style.cssText = 'font-size:13px;font-weight:600;color:#fff;opacity:0.7;margin-bottom:6px;';
+            title.textContent = t('SaveWith');
+            section.appendChild(title);
+
+            const chips = document.createElement('div');
+            chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;';
+            [['page', t('SaveInPage')], ['external', t('SaveExternal')]].forEach(([mode, label]) => {
+                chips.appendChild(makeToggleChip(label, selectedSaveMode === mode, () => {
+                    selectSaveMode(mode);
+                    render();
+                }));
+            });
+            section.appendChild(chips);
+
+            if (selectedSaveMode === 'external') {
+                const hint = document.createElement('div');
+                hint.style.cssText = 'font-size:12px;color:#888;margin-top:6px;';
+                hint.textContent = t('SaveExternalHint');
+                section.appendChild(hint);
+            }
+        };
+
+        render();
+        return section;
+    }
+
+    // --- Seasons and series ---
+
+    function isBatchable(item) {
+        return !!item && (item.Type === 'Season' || item.Type === 'Series');
+    }
+
+    // Every playable episode under a season or series, in watch order. Missing/virtual episodes
+    // (placeholders for episodes the library does not have) are dropped.
+    function fetchEpisodes(parentId) {
+        return new Promise((resolve) => {
+            getApiClient(0, 10, async (client) => {
+                try {
+                    const baseUrl = client.serverAddress() || window.location.origin;
+                    const params = new URLSearchParams({
+                        userId: client.getCurrentUserId(),
+                        ParentId: parentId,
+                        IncludeItemTypes: 'Episode',
+                        Recursive: 'true',
+                        IsMissing: 'false',
+                        SortBy: 'ParentIndexNumber,IndexNumber,SortName',
+                        SortOrder: 'Ascending',
+                        Fields: 'MediaSources',
+                    });
+                    const res = await fetch(`${baseUrl}/Items?${params}`, {
+                        headers: { Authorization: `MediaBrowser Token="${client.accessToken()}"` },
+                    });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const payload = await res.json();
+                    const items = readField(payload, 'Items') || [];
+                    resolve(items.filter(e => isTranscodable(e) && e.LocationType !== 'Virtual'));
+                } catch (err) {
+                    console.error('[TranscodeDownloader] Episode list fetch failed:', err);
+                    resolve(null);
+                }
+            }, () => resolve(null));
+        });
+    }
+
     // --- Quality overlay ---
 
     async function showQualitySheet(itemId) {
@@ -963,12 +1073,29 @@
         await capabilitiesPromise;
         if (!document.getElementById('qd-quality-sheet')) return;
 
+        // A season or series becomes a batch of its episodes.
+        let episodes = null;
+        if (isBatchable(item)) {
+            loadingEl.textContent = t('BatchLoading');
+            episodes = await fetchEpisodes(item.Id || itemId);
+            if (!document.getElementById('qd-quality-sheet')) return;
+        }
+
         loadingEl.remove();
 
-        // A sheet can be opened for an item with nothing to transcode (a season, a series);
-        // saying so beats firing a request the server can only fail. A metadata fetch that
-        // failed outright is reported as "no options" instead of a wrong claim about the type.
-        if (!isTranscodable(item)) {
+        if (isBatchable(item)) {
+            if (!episodes || episodes.length === 0) {
+                const notice = document.createElement('div');
+                notice.style.cssText = 'padding:16px 20px;color:#aaa;font-size:14px;';
+                notice.textContent = episodes ? t('BatchEmpty') : t('NoTranscodeOptions');
+                sheet.appendChild(notice);
+                return;
+            }
+            header.textContent = `${t('ChooseQuality')} · ${t('BatchHeader').replace('{count}', episodes.length)}`;
+        } else if (!isTranscodable(item)) {
+            // Anything else with nothing to transcode: saying so beats firing a request the
+            // server can only fail. A metadata fetch that failed outright is reported as
+            // "no options" instead of a wrong claim about the type.
             const notice = document.createElement('div');
             notice.style.cssText = 'padding:16px 20px;color:#aaa;font-size:14px;';
             notice.textContent = item ? t('ItemNotTranscodable') : t('NoTranscodeOptions');
@@ -976,12 +1103,12 @@
             return;
         }
 
-        const source = item && item.MediaSources && item.MediaSources[0];
         // Filtered on the H.264-calibrated base bitrate so the set of rungs on offer stays
-        // stable when the codec changes — only their encoder targets move.
-        const tiers = source && source.Bitrate
-            ? QUALITY_TIERS.filter(tier => tier.bitrate < source.Bitrate)
-            : QUALITY_TIERS;
+        // stable when the codec changes — only their encoder targets move. A batch is filtered
+        // against its highest-bitrate episode.
+        const sourceBitrate = (entry) => (entry && entry.MediaSources && entry.MediaSources[0] && entry.MediaSources[0].Bitrate) || 0;
+        const ceiling = episodes ? Math.max(0, ...episodes.map(sourceBitrate)) : sourceBitrate(item);
+        const tiers = ceiling ? QUALITY_TIERS.filter(tier => tier.bitrate < ceiling) : QUALITY_TIERS;
 
         const tierList = document.createElement('div');
 
@@ -993,7 +1120,8 @@
                 const bitrate = scaleBitrate(tier.bitrate, factor);
                 const btn = makeMenuItem('video_settings', `${tier.resolution} · ${formatBitrate(bitrate)}`, () => {
                     scrim.remove();
-                    onTranscodeMenuClick(bitrate, item.Id || itemId, item);
+                    if (episodes) onBatchTierClick(bitrate, episodes);
+                    else onTranscodeMenuClick(bitrate, item.Id || itemId, item);
                 });
                 tierList.appendChild(btn);
             }
@@ -1019,6 +1147,8 @@
             handoffHint.style.cssText = 'padding:0 20px 8px;font-size:12px;color:#d0a24c;';
             handoffHint.textContent = t('BrowserHandoffHint');
             sheet.appendChild(handoffHint);
+        } else {
+            sheet.appendChild(buildSaveModeSection());
         }
 
         renderTiers();
@@ -1027,20 +1157,32 @@
 
     // --- Download actions ---
 
-    function onTranscodeMenuClick(bitrate, itemId, item) {
-        if (!item) return;
-        // Captured now: the sheet is gone, but the selection must not drift before the
-        // ApiClient callback runs.
-        const videoCodec = selectedVideoCodec;
-        const audioCodec = selectedAudioCodec;
-        getApiClient(0, 5, (client) => {
-            const token = client.accessToken();
-            const baseUrl = client.serverAddress() || window.location.origin;
-            addToQueue(baseUrl, itemId, token, bitrate, item, videoCodec, audioCodec);
-        });
+    // Strip what no filesystem accepts — and '/', which would split the URL path segment the
+    // named download carries the filename in. The server sanitises again.
+    function safeFileName(name) {
+        return String(name)
+            .replace(/\s*:\s*/g, ' - ')
+            .replace(/[\\/*?"<>|\u0000-\u001f]/g, '_')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
-    function addToQueue(baseUrl, itemId, token, selectedBitrate, item, videoCodec, audioCodec) {
+    function buildFileName(item, suffix) {
+        const pad = (n) => String(n).padStart(2, '0');
+        if (item.Type === 'Movie') {
+            const year = item.ProductionYear ? ` (${item.ProductionYear})` : '';
+            return safeFileName(`${item.Name}${year}${suffix}.mp4`);
+        }
+        if (item.Type === 'Episode') {
+            return safeFileName(`${item.SeriesName} S${pad(item.ParentIndexNumber)}E${pad(item.IndexNumber)} - ${item.Name}${suffix}.mp4`);
+        }
+        return safeFileName(`download${suffix}.mp4`);
+    }
+
+    // Everything one download needs, for either save mode.
+    function buildJob(client, itemId, item, bitrate, videoCodec, audioCodec) {
+        const token = client.accessToken();
+        const baseUrl = client.serverAddress() || window.location.origin;
         const mediaSourceId = item.MediaSources && item.MediaSources[0] && item.MediaSources[0].Id
             ? item.MediaSources[0].Id
             : itemId;
@@ -1053,46 +1195,211 @@
         const deviceId = `transcode-downloader-${playSessionId}`;
         // A single codec is sent deliberately: a comma-separated list lets the server silently
         // downgrade while the UI still claims the codec the user picked.
-        const url = `${baseUrl}/Videos/${itemId}/stream.mp4?MediaSourceId=${mediaSourceId}&VideoBitrate=${selectedBitrate}&VideoCodec=${videoCodec}&AudioCodec=${audioCodec}&MaxAudioChannels=2&allowVideoStreamCopy=false&allowAudioStreamCopy=false&Static=false&PlaySessionId=${playSessionId}&DeviceId=${encodeURIComponent(deviceId)}&api_key=${token}`;
-        // Nothing below this point applies inside the Android app: there is no queue entry, no
-        // progress and no filename of ours once the browser owns the transfer.
-        if (isAndroidAppWebView()) {
-            handOffToBrowser(url, baseUrl, deviceId, playSessionId);
-            return;
-        }
-
-        const stopUrl = buildStopUrl(baseUrl, deviceId, playSessionId, token);
+        const query = `MediaSourceId=${mediaSourceId}&VideoBitrate=${bitrate}&VideoCodec=${videoCodec}&AudioCodec=${audioCodec}`
+            + '&MaxAudioChannels=2&allowVideoStreamCopy=false&allowAudioStreamCopy=false&Static=false'
+            + `&PlaySessionId=${playSessionId}&DeviceId=${encodeURIComponent(deviceId)}&ApiKey=${token}`;
 
         const videoTag = codecTag(VIDEO_CODECS, videoCodec);
         const audioTag = codecTag(AUDIO_CODECS, audioCodec);
-        const suffix = ` [${videoTag} ${formatBitrate(selectedBitrate).replace(' ', '')} ${audioTag}]`;
+        const filename = buildFileName(item, ` [${videoTag} ${formatBitrate(bitrate).replace(' ', '')} ${audioTag}]`);
+        const durationSeconds = (item.RunTimeTicks || 0) / 10_000_000;
 
-        const pad = (n) => String(n).padStart(2, '0');
-        let filename;
-        if (item.Type === 'Movie') {
-            filename = `${item.Name} (${item.ProductionYear})${suffix}.mp4`;
-        } else if (item.Type === 'Episode') {
-            filename = `${item.SeriesName} S${pad(item.ParentIndexNumber)}E${pad(item.IndexNumber)} - ${item.Name}${suffix}.mp4`;
-        } else {
-            filename = `download${suffix}.mp4`;
-        }
-
-        const durationSeconds = item.RunTimeTicks / 10_000_000;
-        const estimatedBytes = (selectedBitrate * durationSeconds) / 8;
-
-        enqueue({
-            id: `${itemId}-${Date.now()}`,
+        return {
+            itemId,
             filename,
-            estimatedBytes,
-            url,
-            stopUrl,
             videoCodec,
             audioCodec,
-            codecLabel: `${videoTag} · ${formatBitrate(selectedBitrate)} · ${audioTag}`,
+            estimatedBytes: (bitrate * durationSeconds) / 8,
+            codecLabel: `${videoTag} · ${formatBitrate(bitrate)} · ${audioTag}`,
+            url: `${baseUrl}/Videos/${itemId}/stream.mp4?${query}`,
+            namedUrl: `${baseUrl}/TranscodeDownloader/Download/${itemId}/${encodeURIComponent(filename)}?${query}`,
+            stopUrl: buildStopUrl(baseUrl, deviceId, playSessionId, token),
+        };
+    }
+
+    function onTranscodeMenuClick(bitrate, itemId, item) {
+        if (!item) return;
+        // Captured now: the sheet is gone, but the selection must not drift before the
+        // ApiClient callback runs.
+        const videoCodec = selectedVideoCodec;
+        const audioCodec = selectedAudioCodec;
+        const mode = effectiveSaveMode();
+        getApiClient(0, 5, (client) => {
+            const job = buildJob(client, itemId, item, bitrate, videoCodec, audioCodec);
+            if (mode === 'external') handOffExternally(job);
+            else enqueueJob(job);
+        });
+    }
+
+    function onBatchTierClick(bitrate, episodes) {
+        const videoCodec = selectedVideoCodec;
+        const audioCodec = selectedAudioCodec;
+        const mode = effectiveSaveMode();
+        getApiClient(0, 5, (client) => {
+            const jobs = episodes.map(ep => buildJob(client, ep.Id, ep, bitrate, videoCodec, audioCodec));
+            if (mode === 'external') {
+                // A page may only hand off one link per tap, so a batch becomes a list to send
+                // or copy from.
+                showLinksPanel(jobs);
+            } else {
+                jobs.forEach(enqueueJob);
+                showTransientNotice(t('BatchQueued').replace('{count}', jobs.length));
+            }
+        });
+    }
+
+    function enqueueJob(job) {
+        enqueue({
+            id: `${job.itemId}-${randomId().slice(0, 8)}`,
+            filename: job.filename,
+            estimatedBytes: job.estimatedBytes,
+            url: job.url,
+            stopUrl: job.stopUrl,
+            videoCodec: job.videoCodec,
+            audioCodec: job.audioCodec,
+            codecLabel: job.codecLabel,
             receivedBytes: 0,
             abortController: null,
             status: 'waiting',
         });
+    }
+
+    // --- External handoff ---
+
+    async function copyToClipboard(text) {
+        try {
+            await navigator.clipboard.writeText(text);
+            return true;
+        } catch (_) {
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+            document.body.appendChild(area);
+            area.select();
+            let ok = false;
+            try { ok = document.execCommand('copy'); } catch (__) { ok = false; }
+            area.remove();
+            return ok;
+        }
+    }
+
+    // The named link answers with Content-Disposition: attachment, so following it saves the
+    // file without leaving the page — and a desktop download-manager extension sees a normal,
+    // named download it can take over.
+    function startBrowserDownload(url) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    }
+
+    // Hands one named link to whatever should download it. The server cleans up the transcode
+    // when that download ends (NamedDownloadController), so no stop is tracked here.
+    function handOffExternally(job) {
+        const url = job.namedUrl;
+
+        if (isAndroidAppWebView()) {
+            try {
+                window.NativeShell.openUrl(url);
+                showTransientNotice(t('BrowserHandoffStarted'));
+            } catch (err) {
+                console.error('[TranscodeDownloader] browser handoff failed:', err);
+                showTransientNotice(t('BrowserHandoffFailed'));
+            }
+            return;
+        }
+
+        // On Android the share sheet is the chooser: FDM and other download managers are
+        // share targets for links, while a plain navigation would always go to Chrome itself.
+        if (isAndroidBrowser() && typeof navigator.share === 'function') {
+            navigator.share({ title: job.filename, url })
+                .then(() => showTransientNotice(t('ExternalShared')))
+                .catch((err) => {
+                    if (err && err.name === 'AbortError') return; // user closed the sheet
+                    copyToClipboard(url).then(ok => showTransientNotice(ok ? t('LinkCopied') : t('ExternalFailed')));
+                });
+            return;
+        }
+
+        startBrowserDownload(url);
+        showTransientNotice(t('ExternalStarted'));
+    }
+
+    function showLinksPanel(jobs) {
+        const existing = document.getElementById('qd-links-panel');
+        if (existing) existing.remove();
+
+        const scrim = document.createElement('div');
+        scrim.id = 'qd-links-panel';
+        scrim.style.cssText = 'position:fixed;inset:0;z-index:10000;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,0.5);';
+        scrim.addEventListener('click', (e) => { if (e.target === scrim) scrim.remove(); });
+
+        const sheet = document.createElement('div');
+        sheet.style.cssText = 'background:#1a1a1a;border-radius:12px 12px 0 0;width:100%;max-width:600px;max-height:85vh;overflow-y:auto;padding:8px 0 24px;color:#fff;';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'padding:16px 20px 8px;font-size:15px;font-weight:600;opacity:0.7;';
+        header.textContent = t('BatchLinksTitle').replace('{count}', jobs.length);
+        sheet.appendChild(header);
+
+        const buttonCss = 'padding:6px 12px;border-radius:4px;border:1px solid #555;background:#2a2a2a;color:#fff;cursor:pointer;font-size:13px;font-family:inherit;flex-shrink:0;';
+
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;gap:8px;padding:0 20px 12px;';
+        const copyAll = document.createElement('button');
+        copyAll.type = 'button';
+        copyAll.textContent = t('CopyAllLinks');
+        copyAll.style.cssText = buttonCss;
+        copyAll.addEventListener('click', async () => {
+            const ok = await copyToClipboard(jobs.map(job => job.namedUrl).join('\n'));
+            showTransientNotice(ok ? t('LinkCopied') : t('ExternalFailed'));
+        });
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = t('Close');
+        close.style.cssText = buttonCss;
+        close.addEventListener('click', () => scrim.remove());
+        actions.appendChild(copyAll);
+        actions.appendChild(close);
+        sheet.appendChild(actions);
+
+        jobs.forEach((job) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 20px;border-top:1px solid #2a2a2a;';
+
+            const name = document.createElement('div');
+            name.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;';
+            name.textContent = job.filename;
+            name.title = job.filename;
+
+            const send = document.createElement('button');
+            send.type = 'button';
+            send.textContent = t('SendLink');
+            send.style.cssText = buttonCss;
+            send.addEventListener('click', () => {
+                handOffExternally(job);
+                send.style.opacity = '0.5';
+            });
+
+            const copy = document.createElement('button');
+            copy.type = 'button';
+            copy.textContent = t('CopyLink');
+            copy.style.cssText = buttonCss;
+            copy.addEventListener('click', async () => {
+                const ok = await copyToClipboard(job.namedUrl);
+                showTransientNotice(ok ? t('LinkCopied') : t('ExternalFailed'));
+            });
+
+            row.appendChild(name);
+            row.appendChild(send);
+            row.appendChild(copy);
+            sheet.appendChild(row);
+        });
+
+        scrim.appendChild(sheet);
+        document.body.appendChild(scrim);
     }
 
     // Capture phase, so the trigger is recorded before Jellyfin's own handler opens the sheet.
@@ -1100,7 +1407,9 @@
     document.addEventListener('contextmenu', recordContextMenuTarget, true);
 
     const _menuObserver = new MutationObserver(() => {
-        const downloadBtn = document.querySelector('.actionSheetMenuItem[data-id="download"]');
+        // Movies and episodes get Jellyfin's "Download"; seasons and series get "Download all".
+        const downloadBtn = document.querySelector('.actionSheetMenuItem[data-id="download"]')
+            || document.querySelector('.actionSheetMenuItem[data-id="downloadall"]');
         if (downloadBtn) injectMenuItems(downloadBtn);
     });
     _menuObserver.observe(document.body, { childList: true, subtree: true });
@@ -1111,6 +1420,9 @@
     if (window.location.hash.startsWith('#/details')) {
         onHashChange();
     }
+
+    const storedSaveMode = readStoredCodec(STORAGE_SAVE_MODE);
+    if (SAVE_MODES.includes(storedSaveMode)) selectedSaveMode = storedSaveMode;
 
     injectQueuePanel();
     initStrings();
