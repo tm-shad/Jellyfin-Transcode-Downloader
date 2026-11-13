@@ -24,6 +24,7 @@ src/
 ├── IndexHtmlInjectionFilter.cs  — IStartupFilter injecting the tag into index.html responses
 ├── TranscodeDownloaderController.cs — ApiController serving the embedded JS at /TranscodeDownloader/ClientScript
 ├── CodecCapabilities.cs         — DTOs for the /Codecs response contract
+├── NamedDownloadController.cs   — GET|HEAD /TranscodeDownloader/Download/{id}/{name}: loopback proxy of stream.mp4 with Content-Disposition (ADR 0006)
 └── JellyfinTranscodeDownloader.csproj — net9.0, Jellyfin 10.11.x SDK, ASP.NET Core, embedded plugin.js
 web/
 ├── plugin.js                    — client logic (button injection, codec picker, download, progress); embedded as a resource
@@ -76,7 +77,8 @@ The `?v=` query is the plugin assembly version, set at release time via
 ### Client logic (`web/plugin.js` — only its delivery is owned by C#; do not change its logic)
 
 - **Download URL — transcoded**:
-  `/Videos/{itemId}/stream.mp4?MediaSourceId={mediaSourceId}&VideoBitrate={bitrate}&VideoCodec={videoCodec}&AudioCodec={audioCodec}&MaxAudioChannels=2&Static=false&PlaySessionId={id}&DeviceId={id}&api_key={token}`
+  `/Videos/{itemId}/stream.mp4?MediaSourceId={mediaSourceId}&VideoBitrate={bitrate}&VideoCodec={videoCodec}&AudioCodec={audioCodec}&MaxAudioChannels=2&Static=false&PlaySessionId={id}&DeviceId={id}&ApiKey={token}`
+  (`ApiKey`, not `api_key`: Jellyfin 12 disables the legacy parameter by default.)
   Must be `VideoBitrate`, not `MaxStreamingBitrate` — the latter is a client-capability hint read during
   the `PlaybackInfo` negotiation, not the encoder target. Sent alone (or paired with `MaxHeight`), it
   collapses the transcode to Jellyfin's minimum tier (416×234) regardless of the value, reproducible via
@@ -190,3 +192,5 @@ Single-context repo: one `CONTEXT.md` + `docs/adr/` at the repo root. See
 | Transcoded downloads buffer into RAM | All downloads use fetch+Blob; size is bounded by the selected bitrate tier |
 | Blob downloads vanish in the Jellyfin Android app's WebView | No `DownloadListener` is registered there; detect the app and hand the URL to `NativeShell.openUrl()` (ADR 0005) |
 | CORS | Non-issue — same origin as the Jellyfin web client |
+| Download managers save `stream.mp4` / can't see blob downloads | External save mode and the Android app hand out the named `/TranscodeDownloader/Download/{id}/{name}` link; the proxy adds `Content-Disposition` and does the ADR-0004 stop itself (ADR 0006) |
+| Seasons/series show `downloadall`, not `download` | The menu observer matches both; a season/series sheet becomes a batch of its non-virtual episodes |

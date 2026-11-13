@@ -85,6 +85,36 @@ The queue is in-memory only: closing or reloading the browser tab clears it.
 
 Cancelling mid-download aborts the in-progress request cleanly; no partial file is saved.
 
+### Download manager mode
+
+The quality picker has a **Save with** switch: **This page** (the default, with the queue and
+progress bar above) or **Download manager**. Your choice is remembered in the browser.
+
+In download manager mode the plugin doesn't download anything itself. It hands out a link to
+`/TranscodeDownloader/Download/{item}/{filename}`, which streams the same Jellyfin transcode
+with a proper filename (`Content-Disposition`), so whatever downloads it saves
+`Show S01E01 - Title [H264 3Mbps AAC].mp4` instead of `stream.mp4`:
+
+- **Android browsers** open the **share sheet** — pick FDM (or any download manager) there. If
+  sharing isn't available the link is copied to the clipboard instead.
+- **Desktop browsers** start a normal named download, which a download-manager extension can
+  take over.
+
+The plugin stops the server-side transcode and deletes its temp file itself when the transfer
+ends. The link carries your session token, so don't share it with anyone else.
+
+### Whole seasons and series
+
+The **Download (Transcode…)** entry also appears in the `⋯` menu of a **season** or **series**,
+next to Jellyfin's own *Download all*. Pick a codec and quality once and it applies to every
+episode (missing episodes are skipped), in episode order:
+
+- **This page**: every episode is added to the download queue.
+- **Download manager**: a list of named links opens, with **Send** (share/download one episode)
+  and **Copy link** per episode, plus **Copy all links** for pasting a batch into a download
+  manager. Each link starts its own transcode, so let your download manager run one or two at
+  a time.
+
 ### In the Jellyfin Android app
 
 The Android app runs the Jellyfin web client inside a WebView that **cannot save downloads
@@ -98,8 +128,8 @@ changes after you pick a tier:
 
 - there is **no progress bar, queue or cancel button** — the transfer belongs to the browser,
   so track it in the browser's own downloads list;
-- the file is saved as **`stream.mp4`** rather than `Movie (2020) [AV1 4Mbps AAC].mp4`, because
-  Jellyfin's stream endpoint doesn't tell the browser what to call it. Rename it afterwards.
+- the file keeps its proper name (`Movie (2020) [AV1 4Mbps AAC].mp4`), because the link goes
+  through the plugin's named download endpoint (see *Download manager mode* below).
 
 The picker says all of this before you choose, so no transcode is started by surprise.
 Downloading through a normal browser on the same phone has none of these limitations.
