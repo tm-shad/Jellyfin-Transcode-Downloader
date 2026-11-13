@@ -222,6 +222,12 @@ Releases are fully tag-driven — no manual edits to the manifest or workflow in
    - Prepends a new version entry to `repo/manifest.json` on `main`
    - Creates a GitHub release and uploads the zip
 
+### Manual release (no local git needed)
+
+Open **Actions → Release → Run workflow** on `main`, enter the version (`1.2.3`) and a
+one-line changelog. The run creates the annotated `v1.2.3` tag itself and then builds,
+publishes and updates `repo/manifest.json` exactly like a tag push.
+
 ### Test release
 
 Use the `test/vX.Y.Z.N` tag prefix (note the **4-component version**). This triggers a

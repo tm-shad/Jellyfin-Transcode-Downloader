@@ -14,6 +14,17 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  # Manual release (e.g. from a phone): creates the annotated tag from main
+  # itself, then runs the same pipeline. A tag pushed with GITHUB_TOKEN does
+  # not trigger the tag-push path again, so this never double-releases.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, X.Y.Z (tag vX.Y.Z is created on main)'
+        required: true
+      changelog:
+        description: 'Changelog (becomes the annotated tag message)'
+        required: true
 
 permissions:
   contents: write
@@ -28,6 +39,9 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      # The tag being released: the pushed tag, or the one a manual run creates.
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
 
     steps:
       # Full history + tags so we can read the annotated tag message, and a
@@ -60,6 +74,32 @@ jobs:
       # manifest mutation happens on `main` in step (3).
       # ----------------------------------------------------------------------
 
+      - name: Create annotated tag (manual run only)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_CHANGELOG: ${{ inputs.changelog }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Manual releases must be run from main (got ${GITHUB_REF})." >&2
+            exit 1
+          fi
+          if ! [[ "${INPUT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '${INPUT_VERSION}' must look like X.Y.Z." >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null; then
+            echo "::error::Tag ${RELEASE_TAG} already exists. Versions are immutable; pick a new one." >&2
+            exit 1
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s\n' "${INPUT_CHANGELOG}" > /tmp/tag-message.txt
+          git tag -a "${RELEASE_TAG}" -F /tmp/tag-message.txt
+          git push origin "refs/tags/${RELEASE_TAG}"
+
       - name: Derive version and read changelog from tag
         id: meta
         shell: bash
@@ -70,23 +110,23 @@ jobs:
           # fetch the tag object itself, so `git cat-file -t <tag>` reports
           # `commit` even for a genuinely annotated tag. Force-refetch the tag
           # ref to restore the annotated tag object before the guard reads it.
-          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
 
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           echo "Releasing version: ${VERSION}"
 
           # GUARD: require an ANNOTATED tag. Annotated tags are `tag` objects;
           # lightweight tags resolve directly to `commit`. For a lightweight
           # tag, `%(contents)` would silently return the tagged commit's
           # message and ship the commit subject as a bogus changelog.
-          TAG_TYPE="$(git cat-file -t "${GITHUB_REF_NAME}")"
+          TAG_TYPE="$(git cat-file -t "${RELEASE_TAG}")"
           if [ "${TAG_TYPE}" != "tag" ]; then
-            echo "::error::Tag '${GITHUB_REF_NAME}' is not an annotated tag (object type: ${TAG_TYPE}). The changelog must come from an annotated tag message; aborting." >&2
+            echo "::error::Tag '${RELEASE_TAG}' is not an annotated tag (object type: ${TAG_TYPE}). The changelog must come from an annotated tag message; aborting." >&2
             exit 1
           fi
 
           # Read the annotated tag body (the human-written changelog).
-          CHANGELOG="$(git tag -l --format='%(contents)' "${GITHUB_REF_NAME}")"
+          CHANGELOG="$(git tag -l --format='%(contents)' "${RELEASE_TAG}")"
 
           # Strip a trailing PGP signature block if the tag is signed.
           # Everything from the BEGIN PGP SIGNATURE marker onward is removed.
@@ -100,7 +140,7 @@ jobs:
 
           # GUARD: an empty tag message means no changelog — fail loudly.
           if [ -z "${CHANGELOG//[[:space:]]/}" ]; then
-            echo "::error::Annotated tag '${GITHUB_REF_NAME}' has an EMPTY message. The tag message IS the changelog; aborting." >&2
+            echo "::error::Annotated tag '${RELEASE_TAG}' has an EMPTY message. The tag message IS the changelog; aborting." >&2
             exit 1
           fi
 
@@ -164,7 +204,7 @@ jobs:
           set -euo pipefail
 
           FULL_VERSION="${VERSION}.0"
-          SOURCE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${ZIP_NAME}"
+          SOURCE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${ZIP_NAME}"
           TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           # Switch from the detached tag checkout to main. We commit the
@@ -220,7 +260,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add repo/manifest.json
-          git commit -m "release: add manifest entry for ${GITHUB_REF_NAME}"
+          git commit -m "release: add manifest entry for ${RELEASE_TAG}"
 
           # Rebase onto any concurrent manifest commit before pushing so we
           # don't clobber another release run that landed first.
@@ -233,7 +273,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "${GITHUB_REF_NAME}" \
+          gh release create "${RELEASE_TAG}" \
             "${{ steps.package.outputs.zip_name }}" \
             --title "Transcode Downloader ${{ steps.meta.outputs.version }}" \
             --generate-notes
